@@ -1,0 +1,963 @@
+---
+title: "Cleaning and standardising geographic names in R with `prep_geonames()`"
+subtitle: "A hands-on workshop for systematic geographic name matching"
+format:
+  html:
+    self-contained: true
+    toc: true
+    toc-depth: 4
+    # html-math-method: katex
+    # css: styles.css
+author:
+  - Mohamed A Yusuf
+date: "2025-09-01"
+categories:
+ - R
+ - Data cleaning
+ - Geospatial
+ - GIS
+ - Training
+editor:
+  markdown:
+    wrap: 72
+---
+
+\vspace{15pt}
+\renewcommand\contentsname{}
+\setcounter{tocdepth}{2}
+\hrule
+\tableofcontents
+\vspace{25pt}
+\hrule
+
+::: {#prerequisites .callout-important}
+*Before you begin, we expect participants to have a basic working knowledge of R.
+If you are new to R or need a refresher, we recommend reviewing the earlier
+sessions on [data visualization](https://ammnet.github.io/ammnet-hackathon/posts/data-vis/)
+and [data wrangling](https://ammnet.github.io/ammnet-hackathon/posts/data-wrangle/).*
+
+*No prior experience with geographic data cleaning is required. However,
+familiarity with the previous [mapping in R](https://ammnet.github.io/ammnet-hackathon/posts/mapping-r/)
+session will be useful. In this session, we focus on systematic approaches to
+geographic name standardisation. You will learn how to detect mismatches,
+apply string-distance algorithms, use interactive review for ambiguous cases,
+and build a reusable cache of corrections for future datasets.*
+:::
+
+## Overview
+
+Welcome back! In this post, we turn our attention to one of the most persistent challenges in public health data management: cleaning and standardising geographic names.
+
+We’ll start with a quick look at why mismatched names create problems in analysis, reporting, and decision-making. From there, we’ll walk through a structured approach to name cleaning using the `sntutils::prep_geonames()` function. Along the way, we’ll explore common issues in real datasets, how
+string-distance algorithms can suggest likely matches, and how to integrate human review only where it is needed.
+
+By the end of this session, you’ll understand how to move from manual, ad hoc fixes to a reproducible workflow that scales from hundreds to tens of thousands of records. You’ll also see how caching, auditing, and match statistics make the process faster, more transparent, and easier to trust.
+
+::: {#learning-objectives .callout-note}
+**Learning Objectives**
+
+By the end of this session, you will be able to:
+
+- Understand the nature of geographic name inconsistencies and their impact on
+  data quality.
+- Detect and standardise geographic names across multiple datasets.
+- Use interactive tools to review and resolve ambiguous matches.
+- Handle edge cases by correcting parent-level misassignments before
+  matching.
+- Save and re-use corrections through a persistent caching system.
+- Validate the quality of name matching with summary statistics.
+- Produce simple visualisations to confirm that geographic names align with
+  official boundaries.
+:::
+
+## The challenge of name matching
+
+Geographic names are rarely consistent across datasets. The same administrative
+unit may appear with different spellings, formats, or even linked to the wrong
+parent. These problems are common in routine health data, survey microdata, and
+sometimes even in official shapefiles.
+
+When names do not match, joins fail and indicators misalign. This leads to
+duplicate units in summaries, broken time series when names switch, and wrong
+denominators in coverage estimates. Analysts spend more time fixing data than
+analysing it, and programme teams lose trust in the results.
+
+### Two types of problems
+
+It is important to distinguish between two categories:
+
+**1. Name inconsistencies**
+These are technical issues that can be addressed with systematic cleaning.
+Examples include:
+
+- Spelling variations (*`Kadunna`* vs *`Kaduna`*).
+- Case inconsistencies (*`KANO`* vs *`Kano`*).
+- Extra whitespace or hidden characters (*` L agos `* vs *`Lagos`*).
+- Abbreviations and aliases (*`FCT`* vs *`Federal Capital Territory`*).
+- Language differences (local vs English/French names).
+- Parent misassignments (district linked to the wrong region).
+
+**2. Administrative changes**
+These are structural changes that cannot be solved by name cleaning alone.
+Examples include:
+
+- New districts created (splits).
+- Old districts merged or dissolved.
+- Boundaries re-drawn to shift populations between units.
+- Renaming linked to political or administrative reforms.
+
+The first set of problems can be handled with a reproducible name-matching
+workflow. The second set requires authoritative boundary data and programme-
+level decisions on how to manage new or obsolete units. **This section focuses
+only on the first category—fixing names**.
+
+### Why manual cleaning fails
+
+Manual cleaning is often the default approach, but it does not scale well as
+datasets grow. Common issues include:
+
+- **Error-prone.** Fatigue leads to inconsistent fixes.
+- **Inconsistent.** Different analysts handle the same issue differently.
+- **Non-reproducible.** Corrections exist only in local files or memory.
+- **Time-consuming.** Large datasets take hours or days to clean.
+- **Lost knowledge.** Corrections disappear when staff leave.
+- **Unverifiable.** Hard to track what was changed, when, or by whom.
+
+Some teams try to improve this by coding row-by-row replacements. While more
+systematic than manual edits, this approach is still limited:
+
+- Hard-coded fixes apply only to one dataset.
+- Scripts become brittle and difficult to maintain.
+- Overlapping fixes spread across multiple files.
+- No single auditable record of decisions exists.
+
+The result is that each new dataset restarts the cycle of ad hoc corrections.
+The same names are fixed again and again, creating extra effort for analysts,
+limited reproducibility, and reduced confidence in outputs. Public health data
+systems need to be auditable—analysts should be able to show *how* a name was
+standardised, *who* made the decision, and *when* it was applied. Without a
+structured workflow, results differ each time, cannot be peer-reviewed, and
+do not build cumulative institutional knowledge.
+
+### Why structured approaches are needed
+
+The challenges of name matching highlight the importance of moving beyond
+one-off fixes. Ad hoc edits may solve immediate problems but do not create
+reproducible or scalable workflows. A more systematic approach is needed—one
+that records decisions, reduces duplication of effort, and makes the process
+auditable.
+
+Such approaches provide a reproducible way to handle recurring issues in name
+standardisation. They reduce the need for repeated ad hoc fixes and strengthen
+confidence in analytical outputs.
+
+## Step-by-step Guide
+
+In this session we present `prep_geonames()`, which illustrates how a
+structured workflow can be applied in practice. Key elements include:
+
+- Algorithms to suggest likely matches.
+- Interactive review to resolve ambiguous cases.
+- A persistent record or cache of accepted decisions.
+- Match statistics and exports to support transparency.
+- Simple validation checks or visualisations to confirm consistency.
+
+### Step 1: Install packages
+
+In the following steps we use `prep_geonames()`, which is part of
+[sntutils](https://github.com/ahadi-analytics/sntutils/tree/master), an R
+package by AHADI to support Subnational Tailoring (SNT) of malaria
+interventions. The package provides a number of helper functions for preparing, cleaning, and
+analysing data to support decision-making at district level and below.
+
+To install `sntutils` and a number of other packages (`dplyr`, `ggplot2` etc.,), we first need the `pak` package. `pak` makes it easy to install R packages, including development versions from GitHub, along with
+their dependencies.
+
+```{r}
+#| label: get packages
+#| eval: false
+
+# 1) install pak
+install.packages("pak")
+
+# 2) install packages
+pak::pkg_install(
+  c(
+    "dplyr",        # data manipulation
+    "here",         # for relative file paths
+    "ggplot2",      # plotting
+    "cli",          # console alerts/messages
+    "grid",         # unit sizing for plot theme elements
+    "ahadi-analytics/sntutils" # for prep_geoname and other helpers
+  ),
+  dependencies = TRUE
+)
+```
+
+```{r}
+#| echo: false
+# 2) install the sntutils package from GitHub
+pak::pkg_install(
+  c(
+    "dplyr",        # data manipulation
+    "DT",           # interactive tables
+    "here",         # for relative file paths
+    "ggplot2",      # plotting
+    "cli",          # console alerts/messages
+    "grid",         # unit sizing for plot theme elements
+    "ahadi-analytics/sntutils" # for prep_geoname and other helpers
+  ),
+  dependencies = TRUE
+)
+```
+
+### Step 2: Load data
+
+For this example we use modeled data from the 2018 Nigeria DHS, available
+through the [DHS Local Data Mapping Tool](https://spatialdata.dhsprogram.com/local-data-mapping-tool).
+Each download includes indicator tables, population counts, uncertainty
+intervals, and shapefiles. Here we use the Admin 2 tables and shapefiles,
+specifically the estimates and confidence intervals for the population
+without basic water. The dataset has been slightly modified with intentional
+name inconsistencies to demonstrate the cleaning workflow.
+
+```{r}
+#| label: get data (fullcode)
+#| eval: false
+# import data
+nga_dhs <- sntutils::read(
+  here::here("01_data/dhs/Admin2_NGDHS2018Table.xlsx")
+) |>
+  dplyr::select(
+    adm0 = adm0_name,
+    adm1 = adm1_name,
+    adm2 = adm2_name,
+    pop_no_basic_water_value = nobaswatv, # % without basic water
+    pop_no_basic_water_ci_lower = nobaswatl, # % without basic water lower CI
+    pop_no_basic_water_ci_upper = nobaswatu # % without basic water upper CI
+  )
+
+# check the data
+dplyr::glimpse(nga_dhs)
+```
+
+::: {.callout-note title="Output" icon="false"}
+```{r}
+#| label: get data
+#| echo: false
+# import data
+nga_dhs <- sntutils::read(
+  here::here("01_data/dhs/Admin2_NGDHS2018Table.xlsx")
+) |>
+  dplyr::select(
+    adm0 = adm0_name,
+    adm1 = adm1_name,
+    adm2 = adm2_name,
+    pop_no_basic_water_value = nobaswatv, # % without basic water
+    pop_no_basic_water_ci_lower = nobaswatl, # % without basic water lower CI
+    pop_no_basic_water_ci_upper = nobaswatu # % without basic water upper CI
+  )
+
+# check the data
+dplyr::glimpse(nga_dhs)
+```
+:::
+
+We also need a reference shapefile of administrative boundaries. For this example we use publicly available WHO ADM2 data, which can be accessed from
+the [WHO ArcGIS service](https://services.arcgis.com/5T5nSi527N4F7luB/ArcGIS/rest/services/Detailed_Boundary_ADM2/FeatureServer), here we use `sntutils` to download it.
+
+```{r}
+#| label: get shapefile (fullcode)
+#| message: false
+#| eval: false
+#| warning: false
+# get/load NGA shapefile (WHO)
+nga_shp <- sntutils::download_shapefile(
+  country_codes = "NGA",
+  admin_level = "adm2",
+  dest_path = here::here("01_data/shapefile")
+)
+
+# check shapefile
+dplyr::glimpse(nga_shp)
+```
+
+::: {.callout-note title="Output" icon="false"}
+```{r}
+#| label: get shapefile
+#| message: false
+#| warning: false
+#| echo: false
+# get/load NGA shapefile (WHO)
+nga_shp <- sntutils::download_shapefile(
+  country_codes = "NGA",
+  admin_level = "adm2",
+  dest_path = here::here("01_data/shapefile")
+)
+
+# check shapefile
+dplyr::glimpse(nga_shp)
+```
+:::
+
+### Step 3: Check matches
+
+Before running any cleaning, inspect how well your dataset matches the reference shapefile (`lookup_data`). Use `sntutils::calculate_match_stats()` to summarise matches by level.
+
+The function is hierarchy-aware. To check or match at `adm2`, you must also provide `adm1` and `adm0`. Column names must be identical in both datasets. The same rule applies at finer levels (e.g., `adm3`, settlements): you must include all higher levels. If your target data use `adm0/adm1/adm2`, your `lookup_data` must use the same names. The same rules apply later in `prep_geonames()`.
+
+```{r}
+#| label: check matches (fullcode)
+#| message: false
+#| eval: false
+#| warning: false
+# check matches
+sntutils::calculate_match_stats(
+  nga_dhs,
+  lookup_data = nga_shp,
+  level0 = "adm0",
+  level1 = "adm1",
+  level2 = "adm2"
+)
+```
+
+::: {.callout-note title="Output" icon="false"}
+```{r}
+#| label: check matches
+#| echo: false
+# check matches
+sntutils::calculate_match_stats(
+  nga_dhs,
+  lookup_data = nga_shp,
+  level0 = "adm0",
+  level1 = "adm1",
+  level2 = "adm2"
+)
+```
+:::
+
+All country names in `nga_dhs` matched those in `nga_shp`. At the `adm1` level, 36 of 37 states matched. At the `adm2` level, 698 of 774 districts matched.
+
+### Step 4: Start matching
+
+#### Step 4.1: Use the shapefile as the reference
+
+We will harmonise the admin names in the target table (`nga_dhs`) to the
+official shapefile (`nga_shp`) with `sntutils::prep_geonames()`. The function is
+hierarchy-aware and proceeds top–down (`adm0` → `adm1` → `adm2`). At each level
+it applies robust text preprocessing (uppercasing, accent removal, whitespace
+normalisation, punctuation handling) and uses string-distance methods to
+suggest likely matches within the correct parent context (e.g., `adm2` only
+compares within the same `adm1`).
+
+Key benefits of `prep_geonames()`:
+
+- Works across up to six levels (`level0`–`level5`).
+- Restricts comparisons within parents (contextually correct candidates).
+- Caches decisions via `cache_path` so future runs automatically reuse prior
+  corrections and can be shared across analysts for consistency.
+
+```{r}
+#| label: run prep_geonames (fullcode)
+#| message: false
+#| eval: false
+#| warning: false
+
+# path to cache
+cache_path <- here::here("01_data/cache/geoname_cleaning_nga.rds")
+unmatched_path <- here::here("01_data/cache/nga_unmatched_adm2.rds")
+
+# 2) Run interactive, hierarchy-based matching
+nga_dhs_cleaned <- sntutils::prep_geonames(
+  target_df = nga_dhs,   # data to be harmonised
+  lookup_df = nga_shp,   # authoritative reference
+  level0 = "adm0",
+  level1 = "adm1",
+  level2 = "adm2",
+  cache_path = cache_path,
+  interactive = TRUE
+)
+```
+
+```{r}
+#| label: run prep_geonames
+#| message: false
+#| echo: false
+#| warning: false
+# path to cache and (optional) export of unmatched
+cache_path <- here::here("01_data/cache/geoname_cleaning_nga.rds")
+
+# 2) Run interactive, hierarchy-based matching
+nga_dhs_cleaned <- sntutils::prep_geonames(
+  target_df = nga_dhs, # data to be harmonised
+  lookup_df = nga_shp, # authoritative reference
+  level0 = "adm0",
+  level1 = "adm1",
+  level2 = "adm2",
+  cache_path = cache_path,
+  interactive = TRUE
+)
+```
+
+You can set `interactive = FALSE` to run in a non‑interactive mode.This ensures headless runs proceed without interactive prompts. When a cache is available, decisions are applied automatically; when it is absent, the code
+leaves names unchanged and continues.
+
+Below is a short video demonstrating the `prep_geonames()` interface and how it
+can be used to clean administrative names interactively.
+
+<video width="100%" height="100%" controls>
+  <source src="assets/videos/orig_prepgeoname.mp4" type="video/mp4">
+  Your browser does not support the video tag.
+</video>
+
+#### Step 4.2: What gets fixed and how caching helps
+
+`prep_geonames()` typically resolves issues like spelling, spacing, and
+formatting while honouring the administrative hierarchy.
+
+All interactive decisions are written to the cache (`here::here("01_data/cache/geoname_cleaning_nga.rds")` in this training). The
+cache records: the admin level, the original name, the chosen replacement from
+the lookup, the full path of the matched hierarchy, the timestamp, and the
+decision maker. Re‑running the function on updated data reuses those decisions
+automatically, which saves time and ensures consistent naming across analysts.
+
+#### Step 4.3: Verify the final join with the shapefile
+
+After harmonisation, confirm that the cleaned table aligns fully with the shapefile structure. Recalculate match stats and check for any remaining unmatched rows.
+
+```{r}
+#| label: verify matches (fullcode)
+#| message: false
+#| eval: false
+#| warning: false
+
+# 1) Recompute match statistics
+sntutils::calculate_match_stats(
+  nga_dhs_cleaned,
+  lookup_data = nga_shp,
+  level0 = "adm0",
+  level1 = "adm1",
+  level2 = "adm2"
+)
+
+# 2) Explicit unmatched check via anti-join
+unmatched_after <- dplyr::anti_join(
+  dplyr::distinct(nga_dhs_cleaned, adm0, adm1, adm2),
+  dplyr::distinct(nga_shp, adm0, adm1, adm2),
+  by = c("adm0", "adm1", "adm2")
+)
+
+if (nrow(unmatched_after) == 0) {
+  cli::cli_alert_success(
+    "All admin units in the target now match the shapefile."
+  )
+} else {
+  cli::cli_alert_warning(
+    paste0(nrow(unmatched_after), " admin units still need attention.")
+  )
+  unmatched_after
+}
+```
+
+::: {.callout-note title="Output" icon="false"}
+```{r}
+#| label: verify matches
+#| echo: false
+
+# 1) Recompute match statistics
+sntutils::calculate_match_stats(
+  nga_dhs_cleaned,
+  lookup_data = nga_shp,
+  level0 = "adm0",
+  level1 = "adm1",
+  level2 = "adm2"
+)
+
+# 2) Explicit unmatched check via anti-join
+unmatched_after <- dplyr::anti_join(
+  dplyr::distinct(nga_dhs_cleaned, adm0, adm1, adm2),
+  dplyr::distinct(nga_shp,        adm0, adm1, adm2),
+  by = c("adm0", "adm1", "adm2")
+)
+
+if (nrow(unmatched_after) == 0) {
+  cli::cli_alert_success(
+    "All admin units in the target now match the shapefile.")
+} else {
+  cli::cli_alert_warning(
+    paste0(nrow(unmatched_after),
+    " admin units still need attention."))
+  unmatched_after
+}
+```
+:::
+
+
+All country names in `nga_dhs` matched those in `nga_shp`. At the `adm1` level, 37 of 37 states matched. At the `adm2` level, 774 of 774 districts matched. Which means our name matching workflow worked.
+
+#### Step 4.4: Review and inspect the cache
+
+With the interactive, stratified matching complete, all units should now align. A small remainder may still be unmatched. Combining geographic constraints with human validation is effective and leaves fewer edge cases.
+
+The cache is both a validation record and a reusable resource. It captures decisions made during the matching process, including confirmation of matches with local knowledge, resolution of ambiguous or misassigned units, alignment with national naming standards, and documentation that supports future harmonisation. The snippet below shows how to read and inspect the saved
+cache (`cache_path`).
+
+```{r}
+#| label: show cache (fullcode)
+#| eval: false
+#| message: false
+#| warning: false
+
+# get cache file
+cache_df <- readRDS(cache_path)
+
+# print cache
+print(cache_df)
+
+```
+
+::: {.callout-note title="Output" icon="false"}
+```{r}
+#| label: show cache
+#| echo: false
+DT::datatable(
+  readRDS(cache_path),
+  caption = paste0(
+    "Table: Cached geoname decisions saved during matching"
+  ),
+  options = list(scrollY = "400px", scrollX = TRUE, info = FALSE),
+  rownames = FALSE,
+  callback = DT::JS(
+    "table.columns().every(function(){",
+    "  this.nodes().to$().css({'white-space':'nowrap'});",
+    "});",
+    "table.table().header().querySelectorAll('th').forEach(function(th){",
+    "  th.style.whiteSpace = 'nowrap';",
+    "});"
+  )
+)
+```
+:::
+
+You can reuse this cache on future datasets with the same geography by pointing
+`cache_path` to the shared file and running with `interactive = FALSE` for
+headless execution.
+
+### Step 5: Edge case — fix parent level before matching
+
+Sometimes an `adm2` is attached to the wrong `adm1` in the source table. Because `prep_geonames()` restricts candidates within the parent, a wrong parent prevents a match. The fix is to amend the parent level up front (with a reproducible rule) and then run matching.
+
+Below we import a new DHS dataset, similar to Step 2, but with a few edge cases where some `adm2` units are assigned to the wrong `adm1`.
+<!--
+ create an amended version of the DHS table (`nga_dhs_edge`) using `dplyr::case_when()` to correct a few illustrative parent misassignments in the dummy example `Admin2_NGDHS2018Table.xlsx`. We then run `prep_geonames()` on this amended table and save the result as `nga_dhs_cleaned_edge`. -->
+
+```{r}
+#| label: edge case data import (fullcode)
+#| message: false
+#| eval: false
+#| warning: false
+# import edge case data
+nga_dhs_edge <- sntutils::read(
+  here::here("01_data/dhs/Admin2_NGDHS2018Table_edge.xlsx")
+) |>
+  dplyr::select(
+    adm0 = adm0_name,
+    adm1 = adm1_name,
+    adm2 = adm2_name,
+    pop_no_basic_water_value = nobaswatv, # % without basic water
+    pop_no_basic_water_ci_lower = nobaswatl, # % without basic water lower CI
+    pop_no_basic_water_ci_upper = nobaswatu # % without basic water upper CI
+  )
+
+# check the matching of the stats of the edge case data
+sntutils::calculate_match_stats(
+  nga_dhs_edge,
+  lookup_data = nga_shp,
+  level0 = "adm0",
+  level1 = "adm1",
+  level2 = "adm2"
+)
+```
+
+::: {.callout-note title="Output" icon="false"}
+```{r}
+#| label: edge case data import
+#| echo: false
+nga_dhs_edge <- sntutils::read(
+  here::here("01_data/dhs/Admin2_NGDHS2018Table_edge.xlsx")
+) |>
+  dplyr::select(
+    adm0 = adm0_name,
+    adm1 = adm1_name,
+    adm2 = adm2_name,
+    pop_no_basic_water_value = nobaswatv, # % without basic water
+    pop_no_basic_water_ci_lower = nobaswatl, # % without basic water lower CI
+    pop_no_basic_water_ci_upper = nobaswatu # % without basic water upper CI
+  )
+
+# check the matching of the stats of the edge case data
+sntutils::calculate_match_stats(
+  nga_dhs_edge,
+  lookup_data = nga_shp,
+  level0 = "adm0",
+  level1 = "adm1",
+  level2 = "adm2"
+)
+```
+:::
+
+Let us try to match the names using our cache, setting `interactive = FALSE` and also setting up a path for `unmatched_export_path` so that we can save and inspect any admin names that we could not match.
+
+```{r}
+#| label: edge case data match (fullcode)
+#| message: false
+#| eval: false
+#| warning: false
+
+# 1) set up path to save the unmatched admin names
+unmatched_path <- here::here("01_data/cache/nga_unmatched_adm2.rds")
+
+# 2) run interactive, hierarchy-based matching
+nga_dhs_edge_cleaned <- sntutils::prep_geonames(
+  target_df = nga_dhs_edge, # data to be harmonised
+  lookup_df = nga_shp, # authoritative reference
+  level0 = "adm0",
+  level1 = "adm1",
+  level2 = "adm2",
+  cache_path = cache_path,
+  unmatched_export_path = unmatched_path,
+  interactive = FALSE
+)
+```
+
+::: {.callout-note title="Output" icon="false"}
+```{r}
+#| label: edge case data match
+#| echo: false
+
+# 1) set up path to save the unmatched admin names
+unmatched_path <- here::here("01_data/cache/nga_unmatched_adm2.rds")
+
+# 2) Run interactive, hierarchy-based matching
+nga_dhs_edge_cleaned <- sntutils::prep_geonames(
+  target_df = nga_dhs_edge, # data to be harmonised
+  lookup_df = nga_shp, # authoritative reference
+  level0 = "adm0",
+  level1 = "adm1",
+  level2 = "adm2",
+  cache_path = cache_path,
+  unmatched_export_path = unmatched_path,
+  interactive = FALSE
+)
+```
+:::
+
+Using our cache from the previous round of matching (Step 4.1), we were able to match 1 of the `adm1`, as well as the 75 mismatched `adm2`. However, we still have 7 `adm2` that we are unable to match.
+
+Using the unmatched data export is very helpful in situations like these. It provides a dataset with an `unmatched_column`, the relevant context columns (e.g., `adm2` with its parent levels `adm0` and `adm1`), and additional metadata such as the lookup source, the target dataset, the user who performed the matching, and the timestamp.
+
+Let us import `unmatched_path` to check what these non-matched admins are.
+
+```{r}
+#| label: show unmatched data (fullcode)
+#| eval: false
+#| message: false
+#| warning: false
+
+# get cache file
+unmatched_df <- readRDS(unmatched_path)
+
+# print cache
+print(unmatched_df)
+
+```
+
+::: {.callout-note title="Output" icon="false"}
+```{r}
+#| label: show unmatched data
+#| echo: false
+DT::datatable(
+  readRDS(unmatched_path),
+  caption = paste0(
+    "Table: Unmatched geoname to check"
+  ),
+  options = list(scrollY = "400px", scrollX = TRUE, info = FALSE),
+  rownames = FALSE,
+  callback = DT::JS(
+    "table.columns().every(function(){",
+    "  this.nodes().to$().css({'white-space':'nowrap'});",
+    "});",
+    "table.table().header().querySelectorAll('th').forEach(function(th){",
+    "  th.style.whiteSpace = 'nowrap';",
+    "});"
+  )
+)
+```
+:::
+
+We can see seven `adm2` units that we couldn't match. Let us check these `adm2` in `nga_shp` to confirm they are under the correct `adm1`.
+
+```{r}
+#| label: check unmatched admin2 in shp (fullcode)
+#| eval: false
+#| message: false
+#| warning: false
+# get names of non‑matched adm2
+nonmatched_adm2 <- c(
+  "ETHIOPE WEST",
+  "IKA NORTH EAST",
+  "IKA SOUTH",
+  "IKEDURU",
+  "ISIALA MBANO",
+  "MBATOLI",
+  "NGOR-OKPALA"
+)
+
+nga_shp |>
+  dplyr::filter(adm2 %in% nonmatched_adm2) |>
+  dplyr::distinct(adm1, adm2)
+```
+
+::: {.callout-note title="Output" icon="false"}
+```{r}
+#| label: check unmatched admin2 in shp
+#| echo: false
+#| message: false
+#| warning: false
+# get names of non‑matched adm2
+nonmatched_adm2 <- c(
+  "ETHIOPE WEST",
+  "IKA NORTH EAST",
+  "IKA SOUTH",
+  "IKEDURU",
+  "ISIALA MBANO",
+  "MBATOLI",
+  "NGOR-OKPALA"
+)
+
+DT::datatable(
+  nga_shp |>
+    dplyr::filter(adm2 %in% nonmatched_adm2) |>
+    dplyr::arrange(adm1) |>
+    dplyr::distinct(adm1, adm2),
+  caption = paste0(
+    "Table: Checking Unmatched adm2 names in shapefile `nga_shp`"
+  ),
+  options = list(scrollY = "400px", scrollX = TRUE, info = FALSE),
+  rownames = FALSE,
+  callback = DT::JS(
+    "table.columns().every(function(){",
+    "  this.nodes().to$().css({'white-space':'nowrap'});",
+    "});",
+    "table.table().header().querySelectorAll('th').forEach(function(th){",
+    "  th.style.whiteSpace = 'nowrap';",
+    "});"
+  )
+)
+```
+:::
+
+So `ETHIOPE WEST`, `IKA NORTH EAST` and `IKA SOUTH` should be under `DELTA`. Meanwhile, `IKEDURU`, `ISIALA MBANO`, `MBATOLI` and `NGOR-OKPALA` should be under `IMO`.
+
+Let us correct these parent (`adm1`) misassignments (`nga_dhs_edge`) using `dplyr::case_when()`, and then attempt matching using our previous `cache_path`.
+
+```{r}
+#| label: fix parent misassignments (fullcode)
+#| message: false
+#| eval: false
+#| warning: false
+# define sets of adm2 that belong to specific adm1
+delta_adm2 <- c(
+  "ETHIOPE WEST",
+  "IKA NORTH EAST",
+  "IKA SOUTH"
+)
+
+imo_adm2 <- c(
+  "IKEDURU",
+  "ISIALA MBANO",
+  "MBATOLI",
+  "NGOR-OKPALA"
+)
+
+# 1) fix parent (adm1) misassignments reproducibly
+nga_dhs_edge_fixed <- nga_dhs_edge_cleaned |>
+  dplyr::mutate(
+    adm1 = dplyr::case_when(
+      adm2 %in% delta_adm2 ~ "DELTA",
+      adm2 %in% imo_adm2 ~ "IMO",
+      TRUE ~ adm1
+    )
+  )
+
+# 2) re-run matching using the cache (non-interactive)
+nga_dhs_edge_cleaned <- sntutils::prep_geonames(
+  target_df = nga_dhs_edge_fixed,
+  lookup_df = nga_shp,
+  level0 = "adm0",
+  level1 = "adm1",
+  level2 = "adm2",
+  cache_path = cache_path,
+  interactive = FALSE
+)
+```
+
+::: {.callout-note title="Output" icon="false"}
+```{r}
+#| label: fix parent misassignments
+#| echo: false
+# define sets of adm2 that belong to specific adm1
+delta_adm2 <- c(
+  "ETHIOPE WEST",
+  "IKA NORTH EAST",
+  "IKA SOUTH"
+)
+
+imo_adm2 <- c(
+  "IKEDURU",
+  "ISIALA MBANO",
+  "MBATOLI",
+  "NGOR-OKPALA"
+)
+
+# 1) fix parent (adm1) misassignments reproducibly
+nga_dhs_edge_fixed <- nga_dhs_edge_cleaned |>
+  dplyr::mutate(
+    adm1 = dplyr::case_when(
+      adm2 %in% delta_adm2 ~ "DELTA",
+      adm2 %in% imo_adm2 ~ "IMO",
+      TRUE ~ adm1
+    )
+  )
+
+# 2) re-run matching using the cache (non-interactive)
+nga_dhs_edge_cleaned <- sntutils::prep_geonames(
+  target_df = nga_dhs_edge_fixed,
+  lookup_df = nga_shp,
+  level0 = "adm0",
+  level1 = "adm1",
+  level2 = "adm2",
+  cache_path = cache_path,
+  interactive = FALSE
+)
+```
+:::
+
+After correcting the parent misassignments for seven `adm2` units, we reran the matching non‑interactively using the existing geoname cache. The cached decisions applied cleanly to `nga_dhs_edge_cleaned`, and all units now align with the WHO ADM2 shapefile; both `adm1` and `adm2` report full matches (`unmatched = 0`). With the hierarchy fixed and names harmonised, we can move on to the map‑based validation in Step 6.
+
+### Step 6: Validate with a map (join to shapefile)
+
+As a final validation, join the cleaned table to the shapefile and visualise `pop_no_basic_water_value` by `adm2`. Any grey/NA areas indicate unmatched units.
+
+```{r}
+#| fig-width: 8
+#| fig-height: 10
+#| label: map-validation (fullcode)
+#| message: false
+#| eval: false
+#| warning: false
+# 1) join cleaned data to shapefile at adm2
+nga_map <- nga_shp |>
+  dplyr::left_join(
+    nga_dhs_edge_cleaned |>
+      dplyr::select(adm0, adm1, adm2, pop_no_basic_water_value),
+    by = c("adm0", "adm1", "adm2")
+  )
+
+# 2) quick NA check on the indicator
+n_na <- sum(is.na(nga_map$pop_no_basic_water_value))
+cli::cli_alert_info(
+  paste0(n_na, " polygons have no indicator value (NA).")
+)
+
+# 3) plot map
+p <- ggplot2::ggplot(nga_map) +
+  ggplot2::geom_sf(
+    ggplot2::aes(fill = pop_no_basic_water_value),
+    color = NA,
+    linewidth = 0
+  ) +
+  ggplot2::scale_fill_viridis_c(
+    option = "A",
+    direction = -1,
+    name = "% without basic water"
+  ) +
+  ggplot2::labs(
+    title = "Nigeria: Population without basic water (DHS 2018, adm2)",
+    subtitle = "Joined using cleaned names (`nga_dhs_edge_cleaned`)",
+    caption = "Source: DHS Local Data Mapping Tool; WHO ADM2 boundaries"
+  ) +
+  ggplot2::theme_void() +
+  ggplot2::theme(
+    plot.title = ggplot2::element_text(face = "bold"),
+    legend.position = "bottom",
+    legend.title.position = "top",
+    legend.key.width = grid::unit(1, "cm"),
+    legend.justification = c(0, 0)
+  )
+
+# save plot
+ggplot2::ggsave(
+  plot = p,
+  filename = "03_outputs/validation_map.png"
+)
+
+# check plot
+print(p)
+```
+
+::: {.callout-note title="Output" icon="false"}
+```{r}
+#| fig-width: 8
+#| fig-height: 7
+#| label: map-validation
+#| echo: false
+# 1) join cleaned data to shapefile at adm2
+nga_map <- nga_shp |>
+  dplyr::left_join(
+    nga_dhs_edge_cleaned |>
+      dplyr::select(adm0, adm1, adm2, pop_no_basic_water_value),
+    by = c("adm0", "adm1", "adm2")
+  )
+
+# 2) quick NA check on the indicator
+n_na <- sum(is.na(nga_map$pop_no_basic_water_value))
+cli::cli_alert_info(
+  paste0(n_na, " polygons have no indicator value (NA).")
+)
+
+# 3) plot map
+p <- ggplot2::ggplot(nga_map) +
+  ggplot2::geom_sf(
+    ggplot2::aes(fill = pop_no_basic_water_value),
+    color = NA,
+    linewidth = 0
+  ) +
+  ggplot2::scale_fill_viridis_c(
+    option = "A",
+    direction = -1,
+    name = "% without basic water"
+  ) +
+  ggplot2::labs(
+    title = "Nigeria: Population without basic water (DHS 2018, adm2)",
+    subtitle = "Joined using cleaned names (`nga_dhs_edge_cleaned`)",
+    caption = "Source: DHS Local Data Mapping Tool; WHO ADM2 boundaries"
+  ) +
+  ggplot2::theme_void() +
+  ggplot2::theme(
+    plot.title = ggplot2::element_text(face = "bold"),
+    legend.position = "bottom",
+    legend.title.position = "top",
+    legend.key.width = grid::unit(1, "cm"),
+    legend.justification = c(0, 0)
+  )
+
+print(p)
+```
+:::
+
+The map joins cleanly: the `NA` count reported above is 0 and there are no grey polygons, confirming that all cleaned DHS units align with the shapefile and the indicator values were attached successfully.
+
+## Summary
+
+We successfully standardised the DHS administrative names using the shapefile as our reference. By running hierarchy‑aware matching (and reusing our cache) and correcting a small set of parent misassignments, we resolved spelling variants and alignment issues so that every `adm1` and `adm2` now matches the WHO ADM2 shapefile. The match statistics and explicit unmatched check both show zero remaining mismatches, and the map validation confirms a clean join with no `NA` polygons. This delivers a reproducible, auditable workflow for geographic name harmonisation that can be reused across datasets via the shared cache.
