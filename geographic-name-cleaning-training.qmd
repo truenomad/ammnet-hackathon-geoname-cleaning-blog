@@ -154,13 +154,17 @@ confidence in analytical outputs.
 ## Step-by-step Guide
 
 In this session we present `prep_geonames()`, which illustrates how a
-structured workflow can be applied in practice. Key elements include:
+structured workflow can be applied in practice.
+
+Key elements include:
 
 - Algorithms to suggest likely matches.
 - Interactive review to resolve ambiguous cases.
 - A persistent record or cache of accepted decisions.
 - Match statistics and exports to support transparency.
 - Simple validation checks or visualisations to confirm consistency.
+
+As an example, we use the 2018 DHS dataset to map the modelled percentage of the population without basic water in Nigeria at the `adm2` level. To ensure a reliable join, we align DHS administrative names with the WHO ADM2 shapefile through hierarchy-aware matching, cached decisions, and correction of parent misassignments. This process standardises spelling and boundary labels so that all DHS `adm1` and `adm2` entries match the WHO reference. We validate the result using unmatched-case checks and a map overlay, confirming a complete join with no missing polygons. The workflow is transparent, auditable, and reusable across DHS indicators and other datasets.
 
 ### Step 1: Install packages
 
@@ -196,6 +200,9 @@ pak::pkg_install(
 
 ```{r}
 #| echo: false
+#| eval: true
+#| warning: false
+#| message: false
 # 2) install the sntutils package from GitHub
 pak::pkg_install(
   c(
@@ -956,8 +963,8 @@ print(p)
 ```
 :::
 
-The map joins cleanly: the `NA` count reported above is 0 and there are no grey polygons, confirming that all cleaned DHS units align with the shapefile and the indicator values were attached successfully.
+If the workflow is executed correctly, the `NA` count should be 0 and there should be no grey polygons; this indicates that cleaned DHS units align with the shapefile and the indicator values are attached successfully.
 
 ## Summary
 
-We successfully standardised the DHS administrative names using the shapefile as our reference. By running hierarchy‑aware matching (and reusing our cache) and correcting a small set of parent misassignments, we resolved spelling variants and alignment issues so that every `adm1` and `adm2` now matches the WHO ADM2 shapefile. The match statistics and explicit unmatched check both show zero remaining mismatches, and the map validation confirms a clean join with no `NA` polygons. This delivers a reproducible, auditable workflow for geographic name harmonisation that can be reused across datasets via the shared cache.
+By following this workflow, you will align DHS administrative names to the WHO ADM2 shapefile using hierarchy‑aware matching, reuse cached decisions, and correct parent misassignments where needed. This should standardise spelling and boundary labelling so that all DHS `adm1` and `adm2` entries match the WHO reference. Final checks using unmatched‑case statistics and a map overlay will confirm whether the join is clean (no `NA` polygons). The approach is reproducible, auditable, and reusable across DHS indicators and other datasets.
